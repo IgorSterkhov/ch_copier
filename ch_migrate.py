@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
 from typing import Optional
 
@@ -29,6 +29,9 @@ class CHMigrateApp:
         self.source_client: Optional[clickhouse_connect.driver.Client] = None
         self.dest_client: Optional[clickhouse_connect.driver.Client] = None
         self.docker_container_name: Optional[str] = None
+
+        self.source_params: dict = self._load_env_params("SOURCE")
+        self.dest_params: dict = self._load_env_params("DESTINATION")
 
         self.selected_tables: set[tuple[str, str]] = set()
         self.table_ddls: dict[tuple[str, str], str] = {}
@@ -66,7 +69,7 @@ class CHMigrateApp:
         src_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
         self.btn_connect_src = ttk.Button(src_frame, text="Подключиться",
-                                          command=self._connect_source)
+                                          command=lambda: self._show_connection_dialog("SOURCE"))
         self.btn_connect_src.pack(side=tk.LEFT)
         self.lbl_src_status = ttk.Label(src_frame, text="Не подключён", foreground="red")
         self.lbl_src_status.pack(side=tk.LEFT, padx=10)
@@ -76,7 +79,7 @@ class CHMigrateApp:
         dst_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.btn_connect_dst = ttk.Button(dst_frame, text="Подключиться",
-                                          command=self._connect_destination)
+                                          command=lambda: self._show_connection_dialog("DESTINATION"))
         self.btn_connect_dst.pack(side=tk.LEFT)
 
         self.btn_docker = ttk.Button(dst_frame, text="Docker CH",
@@ -217,18 +220,30 @@ class CHMigrateApp:
 
     # ── Connection Management ────────────────────────────────────────
 
-    def _make_client(self, prefix: str):
-        host = os.getenv(f"{prefix}_HOST", "localhost")
-        port = int(os.getenv(f"{prefix}_PORT", "8123"))
-        user = os.getenv(f"{prefix}_USER", "default")
-        password = os.getenv(f"{prefix}_PASS", "")
-        database = os.getenv(f"{prefix}_DB", "default")
-        secure = os.getenv(f"{prefix}_SECURE", "False").lower() in ("true", "1", "yes")
-        ca_cert = os.getenv(f"{prefix}_CA_CERT", "")
+    @staticmethod
+    def _load_env_params(prefix: str) -> dict:
+        return {
+            "host": os.getenv(f"{prefix}_HOST", "localhost"),
+            "port": os.getenv(f"{prefix}_PORT", "8123"),
+            "user": os.getenv(f"{prefix}_USER", "default"),
+            "password": os.getenv(f"{prefix}_PASS", ""),
+            "database": os.getenv(f"{prefix}_DB", "default"),
+            "secure": os.getenv(f"{prefix}_SECURE", "False").lower() in ("true", "1", "yes"),
+            "ca_cert": os.getenv(f"{prefix}_CA_CERT", ""),
+        }
+
+    @staticmethod
+    def _make_client_from_params(params: dict):
+        port = int(params.get("port", 8123))
+        secure = params.get("secure", False)
+        ca_cert = params.get("ca_cert", "")
 
         kwargs = dict(
-            host=host, port=port, username=user,
-            password=password, database=database,
+            host=params.get("host", "localhost"),
+            port=port,
+            username=params.get("user", "default"),
+            password=params.get("password", ""),
+            database=params.get("database", "default"),
         )
         if secure:
             kwargs["secure"] = True
@@ -239,14 +254,117 @@ class CHMigrateApp:
 
         return clickhouse_connect.get_client(**kwargs)
 
+    def _show_connection_dialog(self, prefix: str):
+        params = self.source_params if prefix == "SOURCE" else self.dest_params
+        title = "Source" if prefix == "SOURCE" else "Destination"
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Подключение — {title}")
+        dlg.geometry("450x320")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # Host
+        ttk.Label(frame, text="Host:").grid(row=0, column=0, sticky="w", pady=3)
+        host_var = tk.StringVar(value=params.get("host", "localhost"))
+        ttk.Entry(frame, textvariable=host_var, width=32).grid(row=0, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Port
+        ttk.Label(frame, text="Port:").grid(row=1, column=0, sticky="w", pady=3)
+        port_var = tk.StringVar(value=str(params.get("port", "8123")))
+        port_entry = ttk.Entry(frame, textvariable=port_var, width=10)
+        port_entry.grid(row=1, column=1, pady=3, sticky="w")
+
+        # User
+        ttk.Label(frame, text="User:").grid(row=2, column=0, sticky="w", pady=3)
+        user_var = tk.StringVar(value=params.get("user", "default"))
+        ttk.Entry(frame, textvariable=user_var, width=32).grid(row=2, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Password
+        ttk.Label(frame, text="Password:").grid(row=3, column=0, sticky="w", pady=3)
+        pass_var = tk.StringVar(value=params.get("password", ""))
+        ttk.Entry(frame, textvariable=pass_var, width=32, show="*").grid(row=3, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Database
+        ttk.Label(frame, text="Database:").grid(row=4, column=0, sticky="w", pady=3)
+        db_var = tk.StringVar(value=params.get("database", "default"))
+        ttk.Entry(frame, textvariable=db_var, width=32).grid(row=4, column=1, columnspan=2, pady=3, sticky="w")
+
+        # SSL checkbox
+        ssl_var = tk.BooleanVar(value=params.get("secure", False))
+
+        def _on_ssl_toggle():
+            cur_port = port_var.get().strip()
+            if ssl_var.get():
+                if cur_port == "8123":
+                    port_var.set("8443")
+            else:
+                if cur_port == "8443":
+                    port_var.set("8123")
+
+        ssl_check = ttk.Checkbutton(frame, text="SSL/TLS", variable=ssl_var, command=_on_ssl_toggle)
+        ssl_check.grid(row=5, column=0, sticky="w", pady=3)
+
+        # CA cert
+        ttk.Label(frame, text="CA сертификат:").grid(row=6, column=0, sticky="w", pady=3)
+        cert_var = tk.StringVar(value=params.get("ca_cert", ""))
+        cert_entry = ttk.Entry(frame, textvariable=cert_var, width=24)
+        cert_entry.grid(row=6, column=1, pady=3, sticky="w")
+
+        def _browse_cert():
+            path = filedialog.askopenfilename(
+                title="Выберите CA сертификат",
+                filetypes=[("Сертификаты", "*.crt *.pem *.cer"), ("Все файлы", "*.*")],
+            )
+            if path:
+                cert_var.set(path)
+                if not ssl_var.get():
+                    ssl_var.set(True)
+                    _on_ssl_toggle()
+
+        ttk.Button(frame, text="Обзор...", command=_browse_cert).grid(row=6, column=2, pady=3, padx=(5, 0))
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=7, column=0, columnspan=3, pady=(15, 0))
+
+        def on_connect():
+            new_params = {
+                "host": host_var.get().strip(),
+                "port": port_var.get().strip(),
+                "user": user_var.get().strip(),
+                "password": pass_var.get(),
+                "database": db_var.get().strip(),
+                "secure": ssl_var.get(),
+                "ca_cert": cert_var.get().strip(),
+            }
+            if prefix == "SOURCE":
+                self.source_params = new_params
+            else:
+                self.dest_params = new_params
+            dlg.destroy()
+            if prefix == "SOURCE":
+                self._connect_source()
+            else:
+                self._connect_destination()
+
+        ttk.Button(btn_frame, text="Подключиться", command=on_connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Отмена", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
+
     def _connect_source(self):
         def _do():
             try:
-                self.source_client = self._make_client("SOURCE")
+                self.source_client = self._make_client_from_params(self.source_params)
                 ver = self.source_client.server_version
+                host = self.source_params["host"]
+                port = self.source_params["port"]
                 self.root.after(0, lambda: self.lbl_src_status.config(
                     text=f"Подключён ({ver})", foreground="green"))
-                self._log(f"Source подключён: {os.getenv('SOURCE_HOST')}:{os.getenv('SOURCE_PORT')}")
+                self._log(f"Source подключён: {host}:{port}")
                 self.root.after(0, self._load_schema_tree)
             except Exception as e:
                 self.root.after(0, lambda: self.lbl_src_status.config(
@@ -258,11 +376,13 @@ class CHMigrateApp:
     def _connect_destination(self):
         def _do():
             try:
-                self.dest_client = self._make_client("DESTINATION")
+                self.dest_client = self._make_client_from_params(self.dest_params)
                 ver = self.dest_client.server_version
+                host = self.dest_params["host"]
+                port = self.dest_params["port"]
                 self.root.after(0, lambda: self.lbl_dst_status.config(
                     text=f"Подключён ({ver})", foreground="green"))
-                self._log(f"Destination подключён: {os.getenv('DESTINATION_HOST')}:{os.getenv('DESTINATION_PORT')}")
+                self._log(f"Destination подключён: {host}:{port}")
             except Exception as e:
                 self.root.after(0, lambda: self.lbl_dst_status.config(
                     text="Ошибка", foreground="red"))
