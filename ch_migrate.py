@@ -641,7 +641,10 @@ class CHMigrateApp:
                         f"SHOW CREATE TABLE `{database}`.`{table}`"
                     )
                 if isinstance(ddl, str):
-                    ddl = ddl.encode("utf-8").decode("unicode_escape")
+                    ddl = (ddl.replace("\\n", "\n")
+                              .replace("\\'", "'")
+                              .replace("\\t", "\t")
+                              .replace("\\\\", "\\"))
                 self.table_ddls[key] = ddl
             except Exception as e:
                 self.table_ddls[key] = f"-- Error: {e}"
