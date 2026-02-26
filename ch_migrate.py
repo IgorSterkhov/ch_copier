@@ -537,8 +537,8 @@ class CHMigrateApp:
                 )
                 tables = self.source_client.query(
                     "SELECT name, engine, "
-                    "multiIf(engine LIKE '%View%', 'view', "
-                    "engine LIKE '%Dictionary%', 'dictionary', 'table') AS type "
+                    "multiIf(engine LIKE '%%View%%', 'view', "
+                    "engine LIKE '%%Dictionary%%', 'dictionary', 'table') AS type "
                     "FROM system.tables WHERE database = %(db)s ORDER BY name",
                     parameters={"db": db_name},
                 ).result_rows
