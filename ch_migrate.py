@@ -8,7 +8,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import clickhouse_connect
@@ -145,17 +145,32 @@ class CHMigrateApp:
         filter_frame = ttk.LabelFrame(parent, text="Фильтры запроса", padding=5)
         filter_frame.pack(fill=tk.X)
 
+        # Row 0: date column, period preset, limit
         ttk.Label(filter_frame, text="Колонка даты:").grid(row=0, column=0, sticky="w")
-        self.date_column_combo = ttk.Combobox(filter_frame, width=25, state="readonly")
+        self.date_column_combo = ttk.Combobox(filter_frame, width=20, state="readonly")
         self.date_column_combo.grid(row=0, column=1, padx=5)
 
-        ttk.Label(filter_frame, text="Дата от (YYYY-MM-DD):").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        self.date_entry = ttk.Entry(filter_frame, width=15)
-        self.date_entry.grid(row=0, column=3, padx=5)
+        ttk.Label(filter_frame, text="Период:").grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self.period_combo = ttk.Combobox(filter_frame, width=18, state="readonly", values=[
+            "", "-1 день", "-7 дней", "С начала недели", "С начала месяца",
+            "С начала года", "Текущая неделя", "Прошлая неделя",
+            "Текущий месяц", "Прошлый месяц", "Текущий год", "Прошлый год",
+        ])
+        self.period_combo.grid(row=0, column=3, padx=5)
+        self.period_combo.bind("<<ComboboxSelected>>", self._on_period_selected)
 
         ttk.Label(filter_frame, text="LIMIT:").grid(row=0, column=4, sticky="w", padx=(10, 0))
         self.limit_entry = ttk.Entry(filter_frame, width=10)
         self.limit_entry.grid(row=0, column=5, padx=5)
+
+        # Row 1: date from, date to
+        ttk.Label(filter_frame, text="Дата от:").grid(row=1, column=0, sticky="w", pady=(3, 0))
+        self.date_entry = ttk.Entry(filter_frame, width=15)
+        self.date_entry.grid(row=1, column=1, padx=5, pady=(3, 0))
+
+        ttk.Label(filter_frame, text="Дата до:").grid(row=1, column=2, sticky="w", padx=(10, 0), pady=(3, 0))
+        self.date_to_entry = ttk.Entry(filter_frame, width=15)
+        self.date_to_entry.grid(row=1, column=3, padx=5, pady=(3, 0))
 
         # SELECT SQL
         sql_frame = ttk.LabelFrame(parent, text="SELECT SQL (редактируемый)", padding=5)
@@ -679,13 +694,65 @@ class CHMigrateApp:
 
     # ── SQL Generation ───────────────────────────────────────────────
 
+    def _on_period_selected(self, event=None):
+        period = self.period_combo.get()
+        today = date.today()
+
+        date_from = None
+        date_to = None
+
+        if period == "-1 день":
+            date_from = today - timedelta(days=1)
+        elif period == "-7 дней":
+            date_from = today - timedelta(days=7)
+        elif period == "С начала недели":
+            date_from = today - timedelta(days=today.weekday())
+        elif period == "С начала месяца":
+            date_from = today.replace(day=1)
+        elif period == "С начала года":
+            date_from = today.replace(month=1, day=1)
+        elif period == "Текущая неделя":
+            date_from = today - timedelta(days=today.weekday())
+            date_to = date_from + timedelta(days=7)
+        elif period == "Прошлая неделя":
+            this_monday = today - timedelta(days=today.weekday())
+            date_from = this_monday - timedelta(days=7)
+            date_to = this_monday
+        elif period == "Текущий месяц":
+            date_from = today.replace(day=1)
+            if today.month == 12:
+                date_to = today.replace(year=today.year + 1, month=1, day=1)
+            else:
+                date_to = today.replace(month=today.month + 1, day=1)
+        elif period == "Прошлый месяц":
+            first_this = today.replace(day=1)
+            date_to = first_this
+            if today.month == 1:
+                date_from = today.replace(year=today.year - 1, month=12, day=1)
+            else:
+                date_from = today.replace(month=today.month - 1, day=1)
+        elif period == "Текущий год":
+            date_from = today.replace(month=1, day=1)
+            date_to = today.replace(year=today.year + 1, month=1, day=1)
+        elif period == "Прошлый год":
+            date_from = today.replace(year=today.year - 1, month=1, day=1)
+            date_to = today.replace(month=1, day=1)
+
+        self.date_entry.delete(0, tk.END)
+        self.date_to_entry.delete(0, tk.END)
+        if date_from:
+            self.date_entry.insert(0, date_from.isoformat())
+        if date_to:
+            self.date_to_entry.insert(0, date_to.isoformat())
+
     def _generate_select_sql(self):
         if not self.selected_tables:
             self._log("Нет выбранных таблиц", "WARN")
             return
 
         date_col = self.date_column_combo.get().strip()
-        date_val = self.date_entry.get().strip()
+        date_from = self.date_entry.get().strip()
+        date_to = self.date_to_entry.get().strip()
         limit_val = self.limit_entry.get().strip()
 
         sqls = []
@@ -693,8 +760,10 @@ class CHMigrateApp:
             sql = f"SELECT * FROM `{db}`.`{table}`"
 
             where_parts = []
-            if date_col and date_val:
-                where_parts.append(f"`{date_col}` >= '{date_val}'")
+            if date_col and date_from:
+                where_parts.append(f"`{date_col}` >= '{date_from}'")
+            if date_col and date_to:
+                where_parts.append(f"`{date_col}` < '{date_to}'")
             if where_parts:
                 sql += " WHERE " + " AND ".join(where_parts)
             if limit_val and limit_val.isdigit():
@@ -727,8 +796,12 @@ class CHMigrateApp:
             elif ddl[pos] == ")":
                 depth -= 1
                 if depth == 0:
-                    return ddl[:start] + ddl[pos + 1:]
+                    ddl = ddl[:start] + ddl[pos + 1:]
+                    break
             pos += 1
+
+        # ReplicatedMergeTree -> MergeTree, ReplicatedReplacingMergeTree -> ReplacingMergeTree, etc.
+        ddl = re.sub(r"Replicated(\w*MergeTree)", r"\1", ddl)
         return ddl
 
     # ── DDL Generation & Execution ───────────────────────────────────
@@ -741,7 +814,7 @@ class CHMigrateApp:
             self._log("Source не подключён", "ERROR")
             return
 
-        ddl_scripts: list[str] = []
+        ddl_scripts: list[str] = ["SET allow_suspicious_low_cardinality_types=1;"]
         databases_seen: set[str] = set()
 
         for db, table in sorted(self.selected_tables):
