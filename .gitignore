@@ -3,4 +3,5 @@ venv/
 __pycache__/
 *.pyc
 *.crt
+connections.json
 .claude/

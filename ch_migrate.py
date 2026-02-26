@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ClickHouse Migration Tool — GUI for migrating tables between ClickHouse instances."""
 
+import json
 import os
 import re
 import subprocess
@@ -18,6 +19,7 @@ CHECKED = "\u2611"
 UNCHECKED = "\u2610"
 WINDOW_TITLE = "ClickHouse Migration Tool"
 WINDOW_SIZE = "1400x900"
+CONNECTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connections.json")
 
 
 class CHMigrateApp:
@@ -30,7 +32,8 @@ class CHMigrateApp:
         self.dest_client: Optional[clickhouse_connect.driver.Client] = None
         self.docker_container_name: Optional[str] = None
 
-        self.source_params: dict = self._load_env_params("SOURCE")
+        self.connections: dict = self._load_connections()
+        self.source_params: dict = {}
         self.dest_params: dict = self._load_env_params("DESTINATION")
 
         self.selected_tables: set[tuple[str, str]] = set()
@@ -68,9 +71,20 @@ class CHMigrateApp:
         src_frame = ttk.LabelFrame(bar, text="Source", padding=5)
         src_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
+        self.source_combo = ttk.Combobox(src_frame, width=20, state="readonly")
+        self.source_combo.pack(side=tk.LEFT)
+        self.source_combo.bind("<<ComboboxSelected>>", self._on_source_selected)
+        self._refresh_source_combo()
+
         self.btn_connect_src = ttk.Button(src_frame, text="Подключиться",
-                                          command=lambda: self._show_connection_dialog("SOURCE"))
-        self.btn_connect_src.pack(side=tk.LEFT)
+                                          command=self._connect_source)
+        self.btn_connect_src.pack(side=tk.LEFT, padx=(5, 0))
+
+        ttk.Button(src_frame, text="+", width=2,
+                   command=self._add_source_dialog).pack(side=tk.LEFT, padx=(3, 0))
+        ttk.Button(src_frame, text="\u2716", width=2,
+                   command=self._delete_source).pack(side=tk.LEFT, padx=(3, 0))
+
         self.lbl_src_status = ttk.Label(src_frame, text="Не подключён", foreground="red")
         self.lbl_src_status.pack(side=tk.LEFT, padx=10)
 
@@ -232,6 +246,159 @@ class CHMigrateApp:
         self.log_text.config(yscrollcommand=log_scroll.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ── Connections Storage ─────────────────────────────────────────
+
+    def _load_connections(self) -> dict:
+        if os.path.isfile(CONNECTIONS_FILE):
+            with open(CONNECTIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        # Migrate from .env if SOURCE_HOST is set
+        data = {"sources": {}}
+        env_host = os.getenv("SOURCE_HOST", "")
+        if env_host:
+            data["sources"]["Default"] = self._load_env_params("SOURCE")
+        return data
+
+    def _save_connections(self):
+        with open(CONNECTIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.connections, f, indent=2, ensure_ascii=False)
+
+    def _refresh_source_combo(self):
+        names = list(self.connections.get("sources", {}).keys())
+        self.source_combo["values"] = names
+        if names and not self.source_combo.get():
+            self.source_combo.current(0)
+            self._on_source_selected()
+
+    def _on_source_selected(self, event=None):
+        name = self.source_combo.get()
+        sources = self.connections.get("sources", {})
+        if name in sources:
+            self.source_params = sources[name].copy()
+
+    def _add_source_dialog(self):
+        self._show_source_edit_dialog()
+
+    def _show_source_edit_dialog(self, edit_name: str = ""):
+        params = self.connections.get("sources", {}).get(edit_name, {}) if edit_name else {}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Новый сервер-источник" if not edit_name else f"Редактировать: {edit_name}")
+        dlg.geometry("450x360")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # Name
+        ttk.Label(frame, text="Имя сервера:").grid(row=0, column=0, sticky="w", pady=3)
+        name_var = tk.StringVar(value=edit_name)
+        ttk.Entry(frame, textvariable=name_var, width=32).grid(row=0, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Host
+        ttk.Label(frame, text="Host:").grid(row=1, column=0, sticky="w", pady=3)
+        host_var = tk.StringVar(value=params.get("host", "localhost"))
+        ttk.Entry(frame, textvariable=host_var, width=32).grid(row=1, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Port
+        ttk.Label(frame, text="Port:").grid(row=2, column=0, sticky="w", pady=3)
+        port_var = tk.StringVar(value=str(params.get("port", "8123")))
+        ttk.Entry(frame, textvariable=port_var, width=10).grid(row=2, column=1, pady=3, sticky="w")
+
+        # User
+        ttk.Label(frame, text="User:").grid(row=3, column=0, sticky="w", pady=3)
+        user_var = tk.StringVar(value=params.get("user", "default"))
+        ttk.Entry(frame, textvariable=user_var, width=32).grid(row=3, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Password
+        ttk.Label(frame, text="Password:").grid(row=4, column=0, sticky="w", pady=3)
+        pass_var = tk.StringVar(value=params.get("password", ""))
+        ttk.Entry(frame, textvariable=pass_var, width=32, show="*").grid(row=4, column=1, columnspan=2, pady=3, sticky="w")
+
+        # Database
+        ttk.Label(frame, text="Database:").grid(row=5, column=0, sticky="w", pady=3)
+        db_var = tk.StringVar(value=params.get("database", "default"))
+        ttk.Entry(frame, textvariable=db_var, width=32).grid(row=5, column=1, columnspan=2, pady=3, sticky="w")
+
+        # SSL
+        ssl_var = tk.BooleanVar(value=params.get("secure", False))
+
+        def _on_ssl_toggle():
+            if ssl_var.get() and port_var.get() == "8123":
+                port_var.set("8443")
+            elif not ssl_var.get() and port_var.get() == "8443":
+                port_var.set("8123")
+
+        ttk.Checkbutton(frame, text="SSL/TLS", variable=ssl_var, command=_on_ssl_toggle).grid(row=6, column=0, sticky="w", pady=3)
+
+        # CA cert
+        ttk.Label(frame, text="CA сертификат:").grid(row=7, column=0, sticky="w", pady=3)
+        cert_var = tk.StringVar(value=params.get("ca_cert", ""))
+        ttk.Entry(frame, textvariable=cert_var, width=24).grid(row=7, column=1, pady=3, sticky="w")
+
+        def _browse():
+            path = filedialog.askopenfilename(
+                title="Выберите CA сертификат",
+                filetypes=[("Сертификаты", "*.crt *.pem *.cer"), ("Все файлы", "*.*")],
+            )
+            if path:
+                cert_var.set(path)
+                if not ssl_var.get():
+                    ssl_var.set(True)
+                    _on_ssl_toggle()
+
+        ttk.Button(frame, text="Обзор...", command=_browse).grid(row=7, column=2, pady=3, padx=(5, 0))
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=8, column=0, columnspan=3, pady=(15, 0))
+
+        def on_save():
+            srv_name = name_var.get().strip()
+            if not srv_name:
+                messagebox.showwarning("Ошибка", "Укажите имя сервера", parent=dlg)
+                return
+            new_params = {
+                "host": host_var.get().strip(),
+                "port": port_var.get().strip(),
+                "user": user_var.get().strip(),
+                "password": pass_var.get(),
+                "database": db_var.get().strip(),
+                "secure": ssl_var.get(),
+                "ca_cert": cert_var.get().strip(),
+            }
+            if "sources" not in self.connections:
+                self.connections["sources"] = {}
+            # If renaming, remove old key
+            if edit_name and edit_name != srv_name and edit_name in self.connections["sources"]:
+                del self.connections["sources"][edit_name]
+            self.connections["sources"][srv_name] = new_params
+            self._save_connections()
+            self._refresh_source_combo()
+            self.source_combo.set(srv_name)
+            self._on_source_selected()
+            dlg.destroy()
+            self._log(f"Сервер '{srv_name}' сохранён")
+
+        ttk.Button(btn_frame, text="Сохранить", command=on_save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Отмена", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
+
+    def _delete_source(self):
+        name = self.source_combo.get()
+        if not name:
+            return
+        if not messagebox.askyesno("Удаление", f"Удалить сервер '{name}'?"):
+            return
+        sources = self.connections.get("sources", {})
+        if name in sources:
+            del sources[name]
+            self._save_connections()
+            self._refresh_source_combo()
+            self.source_params = {}
+            self._log(f"Сервер '{name}' удалён")
 
     # ── Connection Management ────────────────────────────────────────
 
@@ -417,6 +584,10 @@ class CHMigrateApp:
         ttk.Button(btn_frame, text="Отмена", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
 
     def _connect_source(self):
+        if not self.source_params or not self.source_params.get("host"):
+            self._log("Выберите сервер-источник из списка или создайте новый (+)", "WARN")
+            return
+
         def _do():
             try:
                 self.source_client = self._make_client_from_params(self.source_params)
@@ -833,7 +1004,8 @@ class CHMigrateApp:
 
         self.ddl_mig_text.delete("1.0", tk.END)
         self.ddl_mig_text.insert("1.0", "\n\n".join(ddl_scripts))
-        self._log(f"Сгенерирован DDL для {len(self.selected_tables)} таблиц")
+        tables_list = ", ".join(f"`{db}`.`{t}`" for db, t in sorted(self.selected_tables))
+        self._log(f"Сгенерирован DDL для {len(self.selected_tables)} таблиц: {tables_list}")
 
     def _create_ddl_on_destination(self):
         if not self.dest_client:
