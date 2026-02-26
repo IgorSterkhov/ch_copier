@@ -233,6 +233,51 @@ class CHMigrateApp:
         }
 
     @staticmethod
+    def _save_params_to_env(prefix: str, params: dict):
+        """Save connection params to .env file."""
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+        # Read existing lines
+        lines = []
+        if os.path.isfile(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+        mapping = {
+            f"{prefix}_HOST": params.get("host", "localhost"),
+            f"{prefix}_PORT": str(params.get("port", "8123")),
+            f"{prefix}_USER": params.get("user", "default"),
+            f"{prefix}_PASS": params.get("password", ""),
+            f"{prefix}_DB": params.get("database", "default"),
+            f"{prefix}_SECURE": str(params.get("secure", False)),
+            f"{prefix}_CA_CERT": params.get("ca_cert", ""),
+        }
+
+        # Update existing keys or track which are missing
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                key = stripped.split("=", 1)[0].strip()
+                if key in mapping:
+                    new_lines.append(f"{key}={mapping[key]}\n")
+                    updated_keys.add(key)
+                    continue
+            new_lines.append(line)
+
+        # Append keys that weren't found
+        missing = set(mapping) - updated_keys
+        if missing:
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines.append("\n")
+            for key in sorted(missing):
+                new_lines.append(f"{key}={mapping[key]}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+    @staticmethod
     def _make_client_from_params(params: dict):
         port = int(params.get("port", 8123))
         secure = params.get("secure", False)
@@ -346,6 +391,7 @@ class CHMigrateApp:
                 self.source_params = new_params
             else:
                 self.dest_params = new_params
+            self._save_params_to_env(prefix, new_params)
             dlg.destroy()
             if prefix == "SOURCE":
                 self._connect_source()
