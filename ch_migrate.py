@@ -640,6 +640,8 @@ class CHMigrateApp:
                     ddl = self.source_client.command(
                         f"SHOW CREATE TABLE `{database}`.`{table}`"
                     )
+                if isinstance(ddl, str) and "\\n" in ddl:
+                    ddl = ddl.replace("\\n", "\n")
                 self.table_ddls[key] = ddl
             except Exception as e:
                 self.table_ddls[key] = f"-- Error: {e}"
